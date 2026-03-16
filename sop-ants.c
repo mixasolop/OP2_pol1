@@ -21,6 +21,7 @@
 
 volatile sig_atomic_t stop_work;
 static int read_fd;
+
 typedef struct node
 {
     int indexes[MAX_GRAPH_NODES];
@@ -35,6 +36,12 @@ typedef struct graph
     int node_num;
 }graph_t;
 
+typedef struct ant
+{
+    int ID;
+    int path[MAX_PATH_LENGTH];
+    int path_length;
+}ant_t;
 
 
 int set_handler(void (*f)(int), int sig)
@@ -96,7 +103,8 @@ graph_t read_colony(char* name){
     return graph;
 }
 
-void child_work(node_t node, int index, int fd_w[MAX_GRAPH_NODES]){
+void child_work(node_t node, int index, int fd_w[MAX_GRAPH_NODES], int destination_idx){
+    srand(getpid());
     set_handler(sig_handler, SIGINT);
     printf("{%d}: ", index);
     for(int i = 0; i < node.neighbours_num; i++){
@@ -105,12 +113,30 @@ void child_work(node_t node, int index, int fd_w[MAX_GRAPH_NODES]){
     printf("\n");
     read_fd = node.pipe[0];
     while(!stop_work){
-        char p;
-        if(read(node.pipe[0], &p, 1) < 0){
+        ant_t ant;
+        if(read(node.pipe[0], &ant, sizeof(ant)) < 0){
             if(errno == EINTR || errno == EBADF){
                 break;
             }
             ERR("read");
+        }
+        msleep(100);
+        ant.path[ant.path_length++] = index;
+        if(node.neighbours_num == 0 || ant.path_length == MAX_PATH_LENGTH){
+            printf("Ant {%d}: got lost\n", ant.ID);
+        }
+        else if(index == destination_idx){
+            printf("Ant {%d}: found food\n", ant.ID);
+        }
+        else{
+            int r = rand()%node.neighbours_num;
+            if(write(fd_w[node.indexes[r]], &ant, sizeof(ant)) == -1){
+                if(errno == EINTR){
+                    break;
+                }
+                fprintf(stderr, "%d\n", r);
+                ERR("write");
+            }
         }
     }
 }
@@ -120,9 +146,11 @@ void child_work(node_t node, int index, int fd_w[MAX_GRAPH_NODES]){
 int main(int argc, char* argv[])
 {
     set_handler(SIG_IGN, SIGINT);
+    set_handler(SIG_IGN, SIGPIPE);
     if (argc != 4)
         usage(argc, argv);
-
+    int starting_index = atoi(argv[2]);
+    int destination_index = atoi(argv[3]);
     graph_t graph = read_colony(argv[1]);
     for(int i = 0; i < graph.node_num; i++){
         if(pipe(graph.nodes[i].pipe) == -1){
@@ -145,7 +173,7 @@ int main(int argc, char* argv[])
                     fd_w[j] = graph.nodes[j].pipe[1];
                 }
             }
-            child_work(graph.nodes[i], i, fd_w);
+            child_work(graph.nodes[i], i, fd_w, destination_index);
             for(int j = 0; j < graph.node_num; j++){
                 if(i == j){
                     close(graph.nodes[i].pipe[0]);
@@ -157,8 +185,29 @@ int main(int argc, char* argv[])
             exit(EXIT_SUCCESS);
         }
     }
+    for(int i = 0; i < graph.node_num; i++){
+        if(i == starting_index){
+            close(graph.nodes[i].pipe[0]);
+        }
+        else{
+            close(graph.nodes[i].pipe[0]);
+            close(graph.nodes[i].pipe[1]);
+        }
+    }
+    int ID = 0;
+    while(1){
+        msleep(1000);
+        ant_t ant = {};
+        ant.ID = ID++;
+        if(write(graph.nodes[starting_index].pipe[1], &ant, sizeof(ant)) == -1){
+            if(errno == EPIPE){
+                break;
+            }
+            ERR("write");
+        }
+    }
 
     while(wait(NULL) > 0){}
-
+    close(graph.nodes[starting_index].pipe[1]);
     exit(EXIT_SUCCESS);
 }
