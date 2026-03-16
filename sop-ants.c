@@ -112,6 +112,7 @@ void child_work(node_t node, int index, int fd_w[MAX_GRAPH_NODES], int destinati
     }
     printf("\n");
     read_fd = node.pipe[0];
+    int fd_r = open(FIFO_NAME, O_WRONLY);
     while(!stop_work){
         ant_t ant;
         if(read(node.pipe[0], &ant, sizeof(ant)) < 0){
@@ -127,6 +128,9 @@ void child_work(node_t node, int index, int fd_w[MAX_GRAPH_NODES], int destinati
         }
         else if(index == destination_idx){
             printf("Ant {%d}: found food\n", ant.ID);
+            if(write(fd_r, &ant, sizeof(ant)) == -1){
+                ERR("write");
+            }
         }
         else{
             int r = rand()%node.neighbours_num;
@@ -134,11 +138,20 @@ void child_work(node_t node, int index, int fd_w[MAX_GRAPH_NODES], int destinati
                 if(errno == EINTR){
                     break;
                 }
+                if(errno == EPIPE){
+                    printf("Ant {%d}: got lost\n", ant.ID);
+                    continue;
+                }
                 fprintf(stderr, "%d\n", r);
                 ERR("write");
             }
+            if(rand()%50 == 0){
+                printf("Node {%d}: collapsed\n", index);
+                break;
+            }
         }
     }
+    close(fd_r);
 }
 
 
@@ -147,6 +160,8 @@ int main(int argc, char* argv[])
 {
     set_handler(SIG_IGN, SIGINT);
     set_handler(SIG_IGN, SIGPIPE);
+    unlink(FIFO_NAME);
+    mkfifo(FIFO_NAME, 0666);
     if (argc != 4)
         usage(argc, argv);
     int starting_index = atoi(argv[2]);
@@ -184,7 +199,7 @@ int main(int argc, char* argv[])
             }
             exit(EXIT_SUCCESS);
         }
-    }
+    }    
     for(int i = 0; i < graph.node_num; i++){
         if(i == starting_index){
             close(graph.nodes[i].pipe[0]);
@@ -193,7 +208,14 @@ int main(int argc, char* argv[])
             close(graph.nodes[i].pipe[0]);
             close(graph.nodes[i].pipe[1]);
         }
+    }    
+
+    int fd = open(FIFO_NAME, O_RDONLY | O_NONBLOCK);
+    if(fd == -1){
+        ERR("open");
     }
+
+
     int ID = 0;
     while(1){
         msleep(1000);
@@ -205,9 +227,24 @@ int main(int argc, char* argv[])
             }
             ERR("write");
         }
+        if(read(fd, &ant, sizeof(ant)) < 0){
+            if(errno == EAGAIN){
+                continue;
+            }
+            ERR("read");
+        }
+        printf("Ant {%d} path: ", ant.ID);
+        for(int i = 0; i < ant.path_length; i++){
+            printf("%d ", ant.path[i]);
+        }
+        printf("\n");
     }
 
+    
+    kill(0, SIGINT);
     while(wait(NULL) > 0){}
     close(graph.nodes[starting_index].pipe[1]);
+    close(fd);
+    unlink(FIFO_NAME);
     exit(EXIT_SUCCESS);
 }
